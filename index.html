@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Firebase Top-Down Shooter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, updateDoc, onSnapshot, deleteDoc, serverTimestamp, arrayUnion, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Game State
+        window.gameState = {
+            screen: 'menu', // menu, lobby, game, gameover
+            appId: typeof __app_id !== 'undefined' ? __app_id : 'default-app',
+            db: null,
+            auth: null,
+            user: null,
+            lobbyId: null,
+            isHost: false,
+            paused: false, // Added pause state
+            players: {},
+            myPlayer: null,
+            projectiles: [],
+            particles: [],
+            camera: { x: 0, y: 0 },
+            gameMode: null, // 'TIME' or 'KILLS'
+            gameLimit: 0,
+            gameStart: 0,
+            mapBounds: { w: 2000, h: 2000 },
+            obstacles: [],
+            winner: null
+        };
+
+        // --- Configs ---
+        const WEAPONS = {
+            pistol: { name: 'Pistol', damage: 15, cooldown: 400, speed: 12, range: 1000, spread: 0, type: 'bullet' },
+            shotgun: { name: 'Shotgun', damage: 8, cooldown: 900, speed: 10, range: 300, spread: 0.3, count: 5, type: 'bullet' },
+            sniper: { name: 'Sniper', damage: 55, cooldown: 1500, speed: 25, range: 2000, spread: 0, type: 'bullet' },
+            rocket: { name: 'Rocket', damage: 100, cooldown: 3000, speed: 6, range: 1500, spread: 0, type: 'rocket' }
+        };
+        
+        const MELEE = {
+            spear: { name: 'Spear', damage: 30, reach: 120, arc: 0.2, cooldown: 800, color: '#C0C0C0' },
+            knife: { name: 'Knife', damage: 20, reach: 60, arc: 0.5, cooldown: 400, color: '#FFFFFF' },
+            axe: { name: 'Axe', damage: 45, reach: 80, arc: Math.PI * 2, cooldown: 1200, color: '#8B4513' }, // Full circle
+            dagger: { name: 'Dual Daggers', damage: 15, reach: 50, arc: Math.PI / 2, cooldown: 200, count: 2, color: '#555555' }
+        };
+
+        const ABILITIES = {
+            sprint: { name: 'Sprint', duration: 3000, cooldown: 10000 },
+            shield: { name: 'Shield', duration: 3000, cooldown: 10000 },
+            teleport: { name: 'Teleport', cooldown: 10000 },
+            invis: { name: 'Invisibility', duration: 5000, cooldown: 10000 }
+        };
+
+        // --- Firebase Init ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyAdLYZ8SZUbWfX8grK3DwRCXjWwANaBIZQ",
+            authDomain: "neonshooter-a9da7.firebaseapp.com",
+            projectId: "neonshooter-a9da7",
+            storageBucket: "neonshooter-a9da7.firebasestorage.app",
+            messagingSenderId: "537378145836",
+            appId: "1:537378145836:web:0a260d47386f056207f389",
+            measurementId: "G-Y5FNRNWJBB"
+        };
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        window.gameState.db = db;
+        window.gameState.auth = auth;
+
+        // --- Auth & Startup ---
+        async function initAuth() {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        }
+
+        initAuth();
+
+        onAuthStateChanged(auth, (u) => {
+            if (u) {
+                window.gameState.user = u;
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('main-menu').classList.remove('hidden');
+            }
+        });
+
+        // --- Core Functions ---
+        
+        // Utils
+        const generateCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+        
+        function getRandomLoadout(category, dict) {
+            const keys = Object.keys(dict);
+            return keys[Math.floor(Math.random() * keys.length)];
+        }
+
+        // --- UI Logic ---
+        
+        window.createGame = async () => {
+            const code = generateCode();
+            const mode = document.getElementById('host-mode').value;
+            const limit = parseInt(document.getElementById('host-limit').value);
+            
+            window.gameState.lobbyId = code;
+            window.gameState.isHost = true;
+            window.gameState.gameMode = mode;
+            window.gameState.gameLimit = limit;
+
+            // Generate Map Obstacles Deterministically (Host decides seed)
+            const seed = Math.floor(Math.random() * 10000);
+
+            try {
+                // Create Lobby Doc
+                await setDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code), {
+                    hostId: window.gameState.user.uid,
+                    state: 'LOBBY',
+                    mode: mode,
+                    limit: limit,
+                    seed: seed,
+                    createdAt: serverTimestamp()
+                });
+
+                joinLobbyUI(code);
+                setupLobbyListener(code);
+            } catch (e) {
+                console.error("Error creating lobby", e);
+                alert("Failed to create lobby: " + e.message);
+            }
+        };
+
+        window.joinGame = async () => {
+            const code = document.getElementById('join-code').value.toUpperCase();
+            if (code.length !== 4) return alert("Invalid code");
+            
+            const lobbyRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code);
+            const snap = await getDoc(lobbyRef);
+            
+            if (!snap.exists()) return alert("Lobby not found");
+            
+            window.gameState.lobbyId = code;
+            window.gameState.isHost = false;
+            joinLobbyUI(code);
+            setupLobbyListener(code);
+        };
+
+        // --- Pause Functions ---
+        window.togglePause = () => {
+            if (window.gameState.screen !== 'game') return;
+            
+            window.gameState.paused = !window.gameState.paused;
+            const menu = document.getElementById('pause-menu');
+            
+            if (window.gameState.paused) {
+                menu.classList.remove('hidden');
+            } else {
+                menu.classList.add('hidden');
+            }
+        };
+
+        window.resumeGame = () => {
+            window.gameState.paused = false;
+            document.getElementById('pause-menu').classList.add('hidden');
+        };
+
+        window.quitToLobby = async () => {
+            // Reloading is the cleanest way to reset state and disconnect
+            // Optional: You could try to delete the player doc here before reloading
+            try {
+                if (window.gameState.user && window.gameState.lobbyId) {
+                   // Best effort status update
+                   const pRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid);
+                   await updateDoc(pRef, { status: 'LEFT' });
+                }
+            } catch(e) {}
+            location.reload();
+        };
+
+        function joinLobbyUI(code) {
+            document.getElementById('main-menu').classList.add('hidden');
+            document.getElementById('lobby-screen').classList.remove('hidden');
+            document.getElementById('lobby-code-display').innerText = code;
+        }
+
+        // --- Loadout Selection ---
+        window.selectLoadout = (type, value, btn) => {
+            // Remove active class from siblings
+            const container = btn.parentElement;
+            Array.from(container.children).forEach(c => c.classList.remove('ring-4', 'ring-blue-500', 'bg-blue-600'));
+            btn.classList.add('ring-4', 'ring-blue-500', 'bg-blue-600');
+            
+            window.gameState.myPlayer = window.gameState.myPlayer || {};
+            if(!window.gameState.myPlayer.loadout) window.gameState.myPlayer.loadout = {};
+            
+            window.gameState.myPlayer.loadout[type] = value;
+        };
+        
+        // --- Lobby Logic ---
+        let lobbyUnsub = null;
+        let playersUnsub = null;
+
+        function setupLobbyListener(code) {
+            // Listen to Lobby State
+            lobbyUnsub = onSnapshot(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code), (snap) => {
+                if(!snap.exists()) {
+                    alert("Lobby closed");
+                    location.reload();
+                    return;
+                }
+                const data = snap.data();
+                
+                // Init Map Seed
+                if(data.seed && window.gameState.obstacles.length === 0) {
+                    generateMap(data.seed);
+                }
+
+                // If Host started game
+                if (data.state === 'PLAYING' && window.gameState.screen !== 'game') {
+                    // Update gamemode from lobby data in case we are a joiner
+                    window.gameState.gameMode = data.mode;
+                    window.gameState.gameLimit = data.limit;
+                    startGame();
+                }
+                
+                if (data.state === 'GAME_OVER') {
+                    endGame(data.winner);
+                }
+            });
+
+            // Listen/Join Players Subcollection
+            const playersRef = collection(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code, 'players');
+            
+            // Register Self
+            const myName = document.getElementById('player-name').value || 'Player';
+            const myColor = document.getElementById('player-color').value;
+            
+            // Initial write
+            const myRef = doc(playersRef, window.gameState.user.uid);
+            
+            // Set initial player state
+            const initialData = {
+                id: window.gameState.user.uid,
+                name: myName,
+                color: myColor,
+                status: 'LOBBY',
+                ready: false,
+                x: 1000, 
+                y: 1000,
+                hp: 100,
+                kills: 0,
+                rotation: 0,
+                loadout: { weapon: 'pistol', melee: 'knife', ability: 'sprint' } // Defaults
+            };
+            
+            setDoc(myRef, initialData);
+
+            // Listen to all players
+            playersUnsub = onSnapshot(playersRef, (snap) => {
+                const list = document.getElementById('player-list');
+                list.innerHTML = '';
+                
+                snap.forEach(d => {
+                    const p = d.data();
+                    // Merge remote data but keep local interpolation vars if they exist
+                    window.gameState.players[p.id] = { ...window.gameState.players[p.id], ...p }; 
+                    
+                    const li = document.createElement('div');
+                    li.className = `p-2 mb-2 rounded flex justify-between items-center ${p.ready ? 'bg-green-800' : 'bg-gray-700'}`;
+                    li.innerHTML = `
+                        <div class="flex items-center gap-2">
+                            <div class="w-4 h-4 rounded-full" style="background-color: ${p.color}"></div>
+                            <span>${p.name}</span>
+                        </div>
+                        <span class="text-xs text-gray-400">${p.status}</span>
+                    `;
+                    list.appendChild(li);
+                });
+
+                // Update Start Button for Host
+                if(window.gameState.isHost) {
+                    const allReady = Object.values(window.gameState.players).length > 0 && Object.values(window.gameState.players).every(p => p.ready);
+                    const btn = document.getElementById('start-game-btn');
+                    if (allReady) {
+                        btn.disabled = false;
+                        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                    } else {
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                    }
+                }
+            });
+        }
+
+        window.toggleReady = async () => {
+            const btn = document.getElementById('ready-btn');
+            const isReady = btn.innerText === "Ready";
+            
+            // Finalize Loadout
+            window.gameState.myPlayer = window.gameState.myPlayer || {};
+            if(!window.gameState.myPlayer.loadout) window.gameState.myPlayer.loadout = { weapon: 'pistol', melee: 'knife', ability: 'sprint' };
+
+            let w = window.gameState.myPlayer.loadout.weapon || 'pistol';
+            let m = window.gameState.myPlayer.loadout.melee || 'knife';
+            let a = window.gameState.myPlayer.loadout.ability || 'sprint';
+
+            if (w === 'random') w = getRandomLoadout('weapon', WEAPONS);
+            if (m === 'random') m = getRandomLoadout('melee', MELEE);
+            if (a === 'random') a = getRandomLoadout('ability', ABILITIES);
+
+            const finalLoadout = { weapon: w, melee: m, ability: a };
+            
+            // Store locally for gameplay so we don't rely on network round trip for our own stats
+            window.gameState.myPlayer.resolvedLoadout = finalLoadout; 
+            window.gameState.myPlayer.loadout = finalLoadout; // Force update local state
+
+            await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), {
+                ready: isReady,
+                loadout: finalLoadout,
+                status: isReady ? 'READY' : 'LOBBY'
+            });
+
+            btn.innerText = isReady ? "Not Ready" : "Ready";
+            btn.className = isReady ? "w-full py-3 bg-red-600 rounded font-bold hover:bg-red-700 transition" : "w-full py-3 bg-green-600 rounded font-bold hover:bg-green-700 transition";
+        };
+
+        window.hostStartGame = async () => {
+            await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId), {
+                state: 'PLAYING',
+                startTime: serverTimestamp()
+            });
+        };
+
+        // --- Game Engine ---
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Input
+        const keys = {};
+        const mouse = { x: 0, y: 0, down: false };
+
+        function generateMap(seed) {
+            // Simple seeded random
+            const rng = () => {
+                seed = (seed * 9301 + 49297) % 233280;
+                return seed / 233280;
+            };
+
+            window.gameState.obstacles = [];
+            // Borders
+            window.gameState.obstacles.push({x: -50, y: -50, w: 2100, h: 50});
+            window.gameState.obstacles.push({x: -50, y: 2000, w: 2100, h: 50});
+            window.gameState.obstacles.push({x: -50, y: 0, w: 50, h: 2000});
+            window.gameState.obstacles.push({x: 2000, y: 0, w: 50, h: 2000});
+
+            // Random Boxes
+            for(let i=0; i<30; i++) {
+                window.gameState.obstacles.push({
+                    x: rng() * 1800 + 100,
+                    y: rng() * 1800 + 100,
+                    w: rng() * 100 + 50,
+                    h: rng() * 100 + 50
+                });
+            }
+        }
+
+        function startGame() {
+            window.gameState.screen = 'game';
+            document.getElementById('lobby-screen').classList.add('hidden');
+            document.getElementById('game-container').classList.remove('hidden');
+            document.getElementById('game-container').appendChild(canvas);
+
+            resize();
+            window.addEventListener('resize', resize);
+            // Modified Key Handler for Escape
+            window.addEventListener('keydown', e => {
+                if (e.key === 'Escape') {
+                    togglePause();
+                    return;
+                }
+                keys[e.key.toLowerCase()] = true;
+            });
+            window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+            window.addEventListener('mousemove', e => {
+                if (window.gameState.paused) return; // Mouse block
+                const rect = canvas.getBoundingClientRect();
+                mouse.x = e.clientX - rect.left + window.gameState.camera.x;
+                mouse.y = e.clientY - rect.top + window.gameState.camera.y;
+            });
+            window.addEventListener('mousedown', () => { 
+                if (window.gameState.paused) return; // Click block
+                mouse.down = true; 
+                handleAttack(); 
+            });
+            window.addEventListener('mouseup', () => mouse.down = false);
+            // Right click ability
+            window.addEventListener('contextmenu', e => { 
+                e.preventDefault(); 
+                if (!window.gameState.paused) handleAbility(); 
+            });
+
+            // Spawn Logic
+            const myP = window.gameState.players[window.gameState.user.uid];
+            
+            // Random spawn point away from obstacles
+            let safe = false;
+            while(!safe) {
+                myP.x = Math.random() * 1800 + 100;
+                myP.y = Math.random() * 1800 + 100;
+                safe = !checkCollision(myP.x, myP.y, 20);
+            }
+            myP.hp = 100;
+            myP.status = 'ALIVE';
+            myP.lastShot = 0;
+            myP.lastAbility = 0;
+            myP.maxSpeed = 5;
+            
+            // Ensure local loadout is set from the resolved one
+            if(window.gameState.myPlayer.resolvedLoadout) {
+                myP.loadout = window.gameState.myPlayer.resolvedLoadout;
+            }
+
+            // Start Loops
+            requestAnimationFrame(gameLoop);
+            setInterval(networkSync, 100); // Send data 10 times a sec
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function checkCollision(x, y, r) {
+            // Map Bounds
+            if (x - r < 0 || x + r > window.gameState.mapBounds.w || y - r < 0 || y + r > window.gameState.mapBounds.h) return true;
+            
+            // Obstacles
+            for(let o of window.gameState.obstacles) {
+                if (x + r > o.x && x - r < o.x + o.w && y + r > o.y && y - r < o.y + o.h) return true;
+            }
+            return false;
+        }
+
+        // --- Mechanics ---
+
+        function handleAbility() {
+            const now = Date.now();
+            const p = window.gameState.players[window.gameState.user.uid];
+            if (p.status !== 'ALIVE') return;
+
+            const abilityName = p.loadout.ability;
+            const ability = ABILITIES[abilityName];
+
+            if (now - (p.lastAbility || 0) < ability.cooldown) return;
+            p.lastAbility = now;
+
+            // Trigger Ability
+            if (abilityName === 'sprint') {
+                p.speedBuff = 1.8;
+                setTimeout(() => p.speedBuff = 1, ability.duration);
+            } else if (abilityName === 'shield') {
+                p.shieldActive = true;
+                setTimeout(() => p.shieldActive = false, ability.duration);
+            } else if (abilityName === 'teleport') {
+                const angle = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+                let dist = 300;
+                let tx = p.x + Math.cos(angle) * dist;
+                let ty = p.y + Math.sin(angle) * dist;
+                // Simple wall check for teleport (don't land inside wall)
+                if (!checkCollision(tx, ty, 20)) {
+                    p.x = tx;
+                    p.y = ty;
+                }
+            } else if (abilityName === 'invis') {
+                p.invisible = true;
+                setTimeout(() => p.invisible = false, ability.duration);
+            }
+
+            // Sync ability usage event (conceptually)
+            // Ideally we'd push an event, but for this demo we just rely on state props syncing (invisible, shieldActive)
+            // But 'invisible' and 'shieldActive' are local vars unless we sync them.
+            // Let's add them to the sync payload!
+        }
+
+        function handleAttack() {
+            const p = window.gameState.players[window.gameState.user.uid];
+            if (p.status !== 'ALIVE') return;
+        }
+
+        function triggerMelee() {
+             const now = Date.now();
+            const p = window.gameState.players[window.gameState.user.uid];
+            if (p.status !== 'ALIVE') return;
+            
+            const meleeName = p.loadout.melee;
+            const melee = MELEE[meleeName];
+            
+            if (now - (p.lastMelee || 0) < melee.cooldown) return;
+            p.lastMelee = now;
+            
+            // Invisibility breaks on attack
+            p.invisible = false;
+
+            // Visuals
+            window.gameState.particles.push({
+                x: p.x, y: p.y, type: 'melee', 
+                rotation: p.rotation, 
+                life: 10, maxLife: 10, 
+                meleeType: meleeName
+            });
+
+            // Logic: Check hits on other players locally, then send 'HIT' event?
+            // Trusted client for hits is easier here.
+            for (let pid in window.gameState.players) {
+                if (pid === window.gameState.user.uid) continue;
+                const target = window.gameState.players[pid];
+                if (target.status !== 'ALIVE') continue;
+
+                const dx = target.x - p.x;
+                const dy = target.y - p.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const angleToTarget = Math.atan2(dy, dx);
+                let angleDiff = Math.abs(angleToTarget - p.rotation);
+                if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+
+                let hit = false;
+                if (meleeName === 'axe') {
+                    // Full circle
+                    if (dist < melee.reach) hit = true;
+                } else {
+                    if (dist < melee.reach && angleDiff < melee.arc / 2) hit = true;
+                }
+
+                if (hit) {
+                    sendHit(pid, melee.damage);
+                }
+            }
+        }
+
+        function shoot() {
+            const now = Date.now();
+            const p = window.gameState.players[window.gameState.user.uid];
+            if (p.status !== 'ALIVE') return;
+
+            const weaponName = p.loadout.weapon;
+            const weapon = WEAPONS[weaponName];
+
+            if (now - (p.lastShot || 0) < weapon.cooldown) return;
+            p.lastShot = now;
+            
+            // Invisibility breaks on attack
+            p.invisible = false;
+
+            const createProj = (angleOffset = 0) => {
+                const angle = p.rotation + angleOffset;
+                // Add recoil/spread
+                const spread = (Math.random() - 0.5) * weapon.spread;
+                const finalAngle = angle + spread;
+
+                const proj = {
+                    x: p.x + Math.cos(finalAngle) * 30,
+                    y: p.y + Math.sin(finalAngle) * 30,
+                    vx: Math.cos(finalAngle) * weapon.speed,
+                    vy: Math.sin(finalAngle) * weapon.speed,
+                    damage: weapon.damage,
+                    range: weapon.range,
+                    distTraveled: 0,
+                    ownerId: window.gameState.user.uid,
+                    type: weapon.type,
+                    target: null
+                };
+
+                // Homing Rocket Logic
+                if (weaponName === 'rocket') {
+                    // Find nearest enemy
+                    let minDist = Infinity;
+                    let targetId = null;
+                    for(let pid in window.gameState.players) {
+                        if (pid === window.gameState.user.uid) continue;
+                        const enemy = window.gameState.players[pid];
+                        if (enemy.status !== 'ALIVE') continue;
+                        const d = Math.hypot(enemy.x - p.x, enemy.y - p.y);
+                        if (d < minDist) {
+                            minDist = d;
+                            targetId = pid;
+                        }
+                    }
+                    if (targetId) proj.target = targetId;
+                }
+
+                window.gameState.projectiles.push(proj);
+            };
+
+            if (weaponName === 'shotgun') {
+                for(let i=0; i<weapon.count; i++) createProj();
+            } else {
+                createProj();
+            }
+        }
+
+        async function sendHit(targetId, dmg) {
+            // Flexible Firestore: We update the target document directly. 
+            // Note: In a production game, this logic would happen in a Cloud Function or via specific Claims to prevent cheating.
+            
+            const targetRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', targetId);
+            
+            try {
+                const tSnap = await getDoc(targetRef);
+                if (tSnap.exists()) {
+                    let currentHp = tSnap.data().hp;
+                    // Check shield
+                    // We need to know if shield is active. It's in the snap if we synced it.
+                    // If not synced, we trust the attacker's local state of the remote player?
+                    // Let's use the local state of the remote player we have in memory to check shield, it's faster.
+                    
+                    let shield = window.gameState.players[targetId].shieldActive;
+                    if (shield) return; // Shield blocks damage
+                    
+                    let newHp = currentHp - dmg;
+                    if (newHp <= 0 && currentHp > 0) {
+                        // Kill confirmed
+                        newHp = 0;
+                        await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), {
+                            kills: (window.gameState.players[window.gameState.user.uid].kills || 0) + 1
+                        });
+                        
+                        // Check Win Condition (Kills)
+                        if (window.gameState.gameMode === 'KILLS' && (window.gameState.players[window.gameState.user.uid].kills + 1) >= window.gameState.gameLimit) {
+                            gameOver(window.gameState.players[window.gameState.user.uid].name);
+                        }
+                    }
+                    
+                    await updateDoc(targetRef, { hp: newHp, status: newHp <= 0 ? 'DEAD' : 'ALIVE' });
+                }
+            } catch(e) {
+                console.log("Hit error", e);
+            }
+        }
+
+        // --- Main Game Loop ---
+        function gameLoop() {
+            if (window.gameState.screen !== 'game') return;
+
+            const myP = window.gameState.players[window.gameState.user.uid];
+            if (!myP) return requestAnimationFrame(gameLoop);
+
+            updateLocalPlayer(myP);
+            updateProjectiles();
+            updateRemotePlayers(); 
+            checkWinConditions();
+            
+            render();
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        function updateLocalPlayer(p) {
+            if (p.status === 'DEAD') return;
+            if (window.gameState.paused) return; // Stop updates if paused
+
+            // Rotation
+            p.rotation = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+
+            // Movement
+            let dx = 0, dy = 0;
+            const speed = (p.maxSpeed || 5) * (p.speedBuff || 1);
+            
+            if (keys['w']) dy -= speed;
+            if (keys['s']) dy += speed;
+            if (keys['a']) dx -= speed;
+            if (keys['d']) dx += speed;
+
+            // Normalize diagonal
+            if (dx !== 0 && dy !== 0) {
+                const len = Math.sqrt(dx*dx + dy*dy);
+                dx = (dx/len) * speed;
+                dy = (dy/len) * speed;
+            }
+
+            const newX = p.x + dx;
+            const newY = p.y + dy;
+
+            // Collision
+            if (!checkCollision(newX, p.y, 20)) p.x = newX;
+            if (!checkCollision(p.x, newY, 20)) p.y = newY;
+
+            // Camera follow
+            window.gameState.camera.x = p.x - canvas.width / 2;
+            window.gameState.camera.y = p.y - canvas.height / 2;
+
+            // Actions
+            if (mouse.down) shoot();
+            if (keys[' ']) triggerMelee();
+        }
+
+        function updateProjectiles() {
+            for (let i = window.gameState.projectiles.length - 1; i >= 0; i--) {
+                const proj = window.gameState.projectiles[i];
+                
+                // Homing Logic
+                if (proj.type === 'rocket' && proj.target) {
+                    const target = window.gameState.players[proj.target];
+                    if (target && target.status === 'ALIVE') {
+                        const angle = Math.atan2(target.y - proj.y, target.x - proj.x);
+                        // Steer
+                        let cvx = Math.cos(angle) * 6;
+                        let cvy = Math.sin(angle) * 6;
+                        proj.vx = proj.vx * 0.9 + cvx * 0.1;
+                        proj.vy = proj.vy * 0.9 + cvy * 0.1;
+                    }
+                }
+
+                proj.x += proj.vx;
+                proj.y += proj.vy;
+                proj.distTraveled += Math.sqrt(proj.vx*proj.vx + proj.vy*proj.vy);
+
+                // Wall Collision
+                if (checkCollision(proj.x, proj.y, 5)) {
+                    window.gameState.projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // Range
+                if (proj.distTraveled > proj.range) {
+                    window.gameState.projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // Player Collision (ONLY OWNER CHECKS HIT)
+                if (proj.ownerId === window.gameState.user.uid) {
+                    for (let pid in window.gameState.players) {
+                        if (pid === window.gameState.user.uid) continue;
+                        const enemy = window.gameState.players[pid];
+                        if (enemy.status !== 'ALIVE') continue;
+
+                        const dist = Math.hypot(enemy.x - proj.x, enemy.y - proj.y);
+                        if (dist < 25) { 
+                            sendHit(pid, proj.damage);
+                            window.gameState.projectiles.splice(i, 1);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        function updateRemotePlayers() {
+            // Visual interpolation is implicit via the 10hz update rate
+        }
+
+        function checkWinConditions() {
+            if (!window.gameState.isHost) return;
+            
+            // Last Man Standing
+            if (window.gameState.gameMode === 'TIME') {
+               const alive = Object.values(window.gameState.players).filter(p => p.status === 'ALIVE');
+               const allPlayers = Object.keys(window.gameState.players);
+               
+               // Only end if game has started and players are actually in
+               if (allPlayers.length > 1 && alive.length === 1) {
+                   gameOver(alive[0].name);
+               } else if (allPlayers.length > 1 && alive.length === 0) {
+                   gameOver("No one"); // Draw
+               }
+            }
+        }
+
+        async function gameOver(winnerName) {
+            await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId), {
+                state: 'GAME_OVER',
+                winner: winnerName
+            });
+        }
+
+        function endGame(winner) {
+            window.gameState.screen = 'gameover';
+            document.getElementById('game-container').classList.add('hidden');
+            document.getElementById('game-over-screen').classList.remove('hidden');
+            document.getElementById('winner-name').innerText = winner + " Wins!";
+        }
+
+        // --- Rendering ---
+        function render() {
+            // Clear
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.translate(-window.gameState.camera.x, -window.gameState.camera.y);
+
+            // Draw Map Background
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(0, 0, window.gameState.mapBounds.w, window.gameState.mapBounds.h);
+            
+            // Draw Grid
+            ctx.beginPath();
+            ctx.strokeStyle = '#222';
+            for(let x=0; x<=window.gameState.mapBounds.w; x+=100) { ctx.moveTo(x,0); ctx.lineTo(x, window.gameState.mapBounds.h); }
+            for(let y=0; y<=window.gameState.mapBounds.h; y+=100) { ctx.moveTo(0,y); ctx.lineTo(window.gameState.mapBounds.w, y); }
+            ctx.stroke();
+
+            // Draw Obstacles
+            ctx.fillStyle = '#444';
+            for(let o of window.gameState.obstacles) {
+                ctx.fillRect(o.x, o.y, o.w, o.h);
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(o.x, o.y, o.w, o.h);
+            }
+
+            // Draw Players
+            for (let pid in window.gameState.players) {
+                const p = window.gameState.players[pid];
+                if (p.status === 'DEAD') {
+                    // Draw Dead Body
+                    ctx.save();
+                    ctx.translate(p.x, p.y);
+                    ctx.fillStyle = '#333';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 15, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.fillStyle = '#f00';
+                    ctx.font = '12px Arial';
+                    ctx.fillText('X', -4, 4);
+                    ctx.restore();
+                    continue;
+                }
+                
+                if (p.invisible && pid !== window.gameState.user.uid) continue; // Don't draw others if invis
+
+                ctx.save();
+                ctx.translate(p.x, p.y);
+                ctx.rotate(p.rotation);
+
+                // Body
+                ctx.globalAlpha = (p.invisible && pid === window.gameState.user.uid) ? 0.4 : 1.0;
+                ctx.fillStyle = p.color || '#fff';
+                ctx.beginPath();
+                ctx.arc(0, 0, 20, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Hands/Weapon
+                ctx.fillStyle = '#888';
+                ctx.fillRect(10, 5, 25, 8); // Gun
+
+                // Shield visual
+                if (p.shieldActive) {
+                    ctx.strokeStyle = '#00ffff';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 30, 0, Math.PI*2);
+                    ctx.stroke();
+                }
+
+                ctx.restore();
+
+                // Nameplate & HP (Always visible unless invis)
+                if (!p.invisible || pid === window.gameState.user.uid) {
+                    ctx.save();
+                    ctx.translate(p.x, p.y - 35);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '12px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(p.name, 0, 0);
+                    
+                    // HP Bar
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(-20, 5, 40, 5);
+                    ctx.fillStyle = 'green';
+                    ctx.fillRect(-20, 5, 40 * (p.hp / 100), 5);
+                    ctx.restore();
+                }
+            }
+
+            // Draw Projectiles
+            for (let proj of window.gameState.projectiles) {
+                ctx.beginPath();
+                if (proj.type === 'rocket') {
+                    ctx.fillStyle = '#f50';
+                    ctx.arc(proj.x, proj.y, 6, 0, Math.PI*2);
+                } else {
+                    ctx.fillStyle = '#ff0';
+                    ctx.arc(proj.x, proj.y, 3, 0, Math.PI*2);
+                }
+                ctx.fill();
+            }
+
+            // Draw Melee Swings (Particles)
+            for (let i=window.gameState.particles.length-1; i>=0; i--) {
+                const part = window.gameState.particles[i];
+                ctx.save();
+                ctx.translate(part.x, part.y);
+                ctx.rotate(part.rotation);
+                
+                const meleeInfo = MELEE[part.meleeType];
+                ctx.fillStyle = meleeInfo.color;
+                ctx.globalAlpha = part.life / part.maxLife;
+                
+                // Draw arc
+                ctx.beginPath();
+                ctx.moveTo(0,0);
+                ctx.arc(0, 0, meleeInfo.reach, -meleeInfo.arc/2, meleeInfo.arc/2);
+                ctx.fill();
+                
+                ctx.restore();
+                part.life--;
+                if(part.life <= 0) window.gameState.particles.splice(i, 1);
+            }
+
+            ctx.restore();
+
+            // HUD
+            const myP = window.gameState.players[window.gameState.user.uid];
+            if (myP) {
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText(`Kills: ${myP.kills || 0}`, 20, 30);
+                
+                const wName = myP.loadout.weapon;
+                ctx.fillText(`Weapon: ${wName}`, 20, 60);
+                
+                const aName = myP.loadout.ability;
+                const aObj = ABILITIES[aName];
+                const cdRem = Math.max(0, aObj.cooldown - (Date.now() - (myP.lastAbility||0)));
+                ctx.fillText(`Ability: ${aName} ${cdRem > 0 ? (cdRem/1000).toFixed(1) : 'READY'}`, 20, 90);
+                
+                const mName = myP.loadout.melee;
+                const mObj = MELEE[mName];
+                const mCdRem = Math.max(0, mObj.cooldown - (Date.now() - (myP.lastMelee||0)));
+                ctx.fillText(`Melee: ${mName} ${mCdRem > 0 ? (mCdRem/1000).toFixed(1) : 'READY'} (Space)`, 20, 120);
+                
+                if (window.gameState.gameMode === 'TIME') {
+                    ctx.fillText("Mode: Last Man Standing", canvas.width/2 - 100, 30);
+                } else {
+                    ctx.fillText(`Limit: ${window.gameState.gameLimit} Kills`, canvas.width/2 - 80, 30);
+                }
+            }
+        }
+
+        // --- Network Sync ---
+        async function networkSync() {
+            if (window.gameState.screen !== 'game') return;
+            const myP = window.gameState.players[window.gameState.user.uid];
+            if (!myP) return;
+
+            const payload = {
+                x: myP.x,
+                y: myP.y,
+                rotation: myP.rotation,
+                hp: myP.hp,
+                status: myP.status,
+                // Sync ability states for visuals
+                shieldActive: myP.shieldActive || false,
+                invisible: myP.invisible || false,
+                lastUpdate: serverTimestamp()
+            };
+
+            await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), payload);
+        }
+
+    </script>
+    <style>
+        body { background-color: #121212; color: white; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        .btn { @apply px-6 py-3 rounded-lg font-bold transition duration-200 transform hover:scale-105 active:scale-95 shadow-lg; }
+        .btn-primary { @apply bg-blue-600 hover:bg-blue-500 text-white; }
+        .btn-secondary { @apply bg-gray-600 hover:bg-gray-500 text-white; }
+        .card { @apply bg-gray-800 p-6 rounded-xl shadow-2xl border border-gray-700; }
+        .input { @apply w-full bg-gray-700 border border-gray-600 rounded p-3 text-white focus:outline-none focus:border-blue-500; }
+        .selection-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+        @media (min-width: 768px) { .selection-grid { grid-template-columns: repeat(5, 1fr); } }
+        canvas { display: block; cursor: crosshair; }
+    </style>
+</head>
+<body class="h-screen w-screen flex items-center justify-center">
+
+    <!-- Loading -->
+    <div id="loading" class="text-2xl font-bold animate-pulse">Connecting to Game Services...</div>
+
+    <!-- Main Menu -->
+    <div id="main-menu" class="hidden w-full max-w-4xl p-4 flex flex-col gap-8">
+        <h1 class="text-6xl font-black text-center text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-600 tracking-tighter">NEON SLAYER</h1>
+        
+        <div class="grid md:grid-cols-2 gap-8">
+            <!-- Host -->
+            <div class="card space-y-4">
+                <h2 class="text-2xl font-bold mb-4 border-b border-gray-600 pb-2"><i class="fas fa-server mr-2"></i>Host Game</h2>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Game Mode</label>
+                    <select id="host-mode" class="input">
+                        <option value="TIME">Last Man Standing</option>
+                        <option value="KILLS">Deathmatch (Race to Kills)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Limit (Mins or Kills)</label>
+                    <select id="host-limit" class="input">
+                        <option value="1">Short / 1 Kill</option>
+                        <option value="3" selected>Medium / 5 Kills</option>
+                        <option value="5">Long / 10 Kills</option>
+                        <option value="25">Marathon / 25 Kills</option>
+                    </select>
+                </div>
+                <button onclick="createGame()" class="btn btn-primary w-full mt-4">Create Lobby</button>
+            </div>
+
+            <!-- Join -->
+            <div class="card space-y-4">
+                <h2 class="text-2xl font-bold mb-4 border-b border-gray-600 pb-2"><i class="fas fa-sign-in-alt mr-2"></i>Join Game</h2>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Enter 4-Letter Code</label>
+                    <input id="join-code" type="text" maxlength="4" class="input text-center text-2xl tracking-widest uppercase" placeholder="ABCD">
+                </div>
+                <button onclick="joinGame()" class="btn btn-secondary w-full mt-4">Join Lobby</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lobby & Loadout -->
+    <div id="lobby-screen" class="hidden w-full h-full flex flex-col md:flex-row bg-gray-900">
+        <!-- Sidebar -->
+        <div class="w-full md:w-1/4 bg-gray-800 p-6 border-r border-gray-700 flex flex-col">
+            <div class="mb-8 text-center">
+                <h3 class="text-gray-400 uppercase text-xs tracking-wider">Lobby Code</h3>
+                <div id="lobby-code-display" class="text-5xl font-mono font-bold text-blue-400 select-all">----</div>
+            </div>
+            
+            <div class="flex-grow overflow-y-auto mb-4">
+                <h3 class="text-gray-400 uppercase text-xs tracking-wider mb-2">Players</h3>
+                <div id="player-list"></div>
+            </div>
+
+            <button id="start-game-btn" onclick="hostStartGame()" disabled class="btn btn-primary w-full mb-2 opacity-50 cursor-not-allowed">Start Game (Host)</button>
+            <button onclick="location.reload()" class="btn btn-secondary w-full text-sm">Leave</button>
+        </div>
+
+        <!-- Loadout -->
+        <div class="flex-grow p-6 overflow-y-auto">
+            <h2 class="text-3xl font-bold mb-6">Customize Loadout</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Player Name</label>
+                    <input id="player-name" type="text" class="input" placeholder="Enter Name" value="Guest">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Color</label>
+                    <input id="player-color" type="color" class="input h-12 p-1" value="#3b82f6">
+                </div>
+            </div>
+
+            <!-- Weapons -->
+            <div class="mb-8">
+                <h3 class="text-xl font-bold mb-3 text-blue-400">Primary Weapon</h3>
+                <div class="selection-grid" id="weapon-select">
+                    <!-- Pistol -->
+                    <button onclick="selectLoadout('weapon', 'pistol', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition ring-4 ring-blue-500 bg-blue-600">
+                        <i class="fas fa-gun text-2xl mb-2"></i><div class="font-bold">Pistol</div><div class="text-xs opacity-75">Balanced</div>
+                    </button>
+                    <!-- Shotgun -->
+                    <button onclick="selectLoadout('weapon', 'shotgun', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-bullseye text-2xl mb-2"></i><div class="font-bold">Shotgun</div><div class="text-xs opacity-75">Spread / Close</div>
+                    </button>
+                    <!-- Sniper -->
+                    <button onclick="selectLoadout('weapon', 'sniper', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-crosshairs text-2xl mb-2"></i><div class="font-bold">Sniper</div><div class="text-xs opacity-75">High Dmg / Slow</div>
+                    </button>
+                    <!-- Rocket -->
+                    <button onclick="selectLoadout('weapon', 'rocket', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-rocket text-2xl mb-2"></i><div class="font-bold">Rocket</div><div class="text-xs opacity-75">Homing / Slow</div>
+                    </button>
+                    <!-- Random -->
+                    <button onclick="selectLoadout('weapon', 'random', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-dice text-2xl mb-2"></i><div class="font-bold">Random</div><div class="text-xs opacity-75">???</div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Melee -->
+            <div class="mb-8">
+                <h3 class="text-xl font-bold mb-3 text-red-400">Melee (Spacebar)</h3>
+                <div class="selection-grid">
+                    <button onclick="selectLoadout('melee', 'knife', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition ring-4 ring-blue-500 bg-blue-600">
+                        <i class="fas fa-utensil-spoon text-2xl mb-2"></i><div class="font-bold">Knife</div><div class="text-xs opacity-75">Fast / Short</div>
+                    </button>
+                    <button onclick="selectLoadout('melee', 'spear', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-ruler-vertical text-2xl mb-2"></i><div class="font-bold">Spear</div><div class="text-xs opacity-75">Long Reach</div>
+                    </button>
+                    <button onclick="selectLoadout('melee', 'axe', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-circle-notch text-2xl mb-2"></i><div class="font-bold">Axe</div><div class="text-xs opacity-75">360 Swing</div>
+                    </button>
+                    <button onclick="selectLoadout('melee', 'dagger', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-angle-double-right text-2xl mb-2"></i><div class="font-bold">Daggers</div><div class="text-xs opacity-75">Wide Arc</div>
+                    </button>
+                    <button onclick="selectLoadout('melee', 'random', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-dice text-2xl mb-2"></i><div class="font-bold">Random</div><div class="text-xs opacity-75">???</div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Abilities -->
+            <div class="mb-8">
+                <h3 class="text-xl font-bold mb-3 text-green-400">Ability (Right Click)</h3>
+                <div class="selection-grid">
+                    <button onclick="selectLoadout('ability', 'sprint', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition ring-4 ring-blue-500 bg-blue-600">
+                        <i class="fas fa-running text-2xl mb-2"></i><div class="font-bold">Sprint</div><div class="text-xs opacity-75">Speed Boost</div>
+                    </button>
+                    <button onclick="selectLoadout('ability', 'shield', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-shield-alt text-2xl mb-2"></i><div class="font-bold">Shield</div><div class="text-xs opacity-75">Invulnerable</div>
+                    </button>
+                    <button onclick="selectLoadout('ability', 'teleport', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-magic text-2xl mb-2"></i><div class="font-bold">Teleport</div><div class="text-xs opacity-75">Blink</div>
+                    </button>
+                    <button onclick="selectLoadout('ability', 'invis', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-ghost text-2xl mb-2"></i><div class="font-bold">Invis</div><div class="text-xs opacity-75">Stealth</div>
+                    </button>
+                    <button onclick="selectLoadout('ability', 'random', this)" class="bg-gray-700 p-4 rounded hover:bg-gray-600 transition">
+                        <i class="fas fa-dice text-2xl mb-2"></i><div class="font-bold">Random</div><div class="text-xs opacity-75">???</div>
+                    </button>
+                </div>
+            </div>
+
+            <button id="ready-btn" onclick="toggleReady()" class="w-full py-4 bg-green-600 rounded text-xl font-bold hover:bg-green-700 transition shadow-lg">
+                Ready
+            </button>
+            <div class="h-10"></div>
+        </div>
+    </div>
+
+    <!-- Game Container -->
+    <div id="game-container" class="hidden absolute top-0 left-0 w-full h-full bg-black">
+        <!-- Canvas injected here -->
+        <div class="absolute top-4 right-4 text-gray-500 text-xs pointer-events-none z-10">WASD to Move | Mouse to Aim | Click Shoot | Space Melee | R-Click Ability | ESC Pause</div>
+    </div>
+
+    <!-- Pause Menu -->
+    <div id="pause-menu" class="hidden absolute top-0 left-0 w-full h-full flex flex-col items-center justify-center bg-black bg-opacity-80 z-50 backdrop-blur-sm">
+        <h2 class="text-5xl font-black text-white mb-8 tracking-tighter">PAUSED</h2>
+        <div class="space-y-4 w-64">
+            <button onclick="resumeGame()" class="btn btn-primary w-full text-xl py-4 border border-blue-400">RESUME</button>
+            <button onclick="quitToLobby()" class="btn btn-secondary w-full text-xl py-4 border border-gray-500 hover:bg-red-600 hover:border-red-500">QUIT TO LOBBY</button>
+        </div>
+    </div>
+
+    <!-- Game Over -->
+    <div id="game-over-screen" class="hidden absolute top-0 left-0 w-full h-full flex flex-col items-center justify-center bg-black bg-opacity-90 z-50">
+        <h1 class="text-6xl font-black text-white mb-4">GAME OVER</h1>
+        <h2 id="winner-name" class="text-4xl text-yellow-400 mb-8 font-bold">Winner</h2>
+        <button onclick="location.reload()" class="btn btn-primary text-xl">Back to Menu</button>
+    </div>
+
+</body>
+</html>
