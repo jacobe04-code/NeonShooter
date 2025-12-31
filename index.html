@@ -6,7 +6,8 @@
     <title>Firebase Top-Down Shooter</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
-    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+
     <!-- Firebase Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -43,7 +44,7 @@
             sniper: { name: 'Sniper', damage: 55, cooldown: 1500, speed: 25, range: 2000, spread: 0, type: 'bullet' },
             rocket: { name: 'Rocket', damage: 100, cooldown: 3000, speed: 6, range: 1500, spread: 0, type: 'rocket' }
         };
-        
+
         const MELEE = {
             spear: { name: 'Spear', damage: 30, reach: 120, arc: 0.2, cooldown: 800, color: '#C0C0C0' },
             knife: { name: 'Knife', damage: 20, reach: 60, arc: 0.5, cooldown: 400, color: '#FFFFFF' },
@@ -94,22 +95,22 @@
         });
 
         // --- Core Functions ---
-        
+
         // Utils
         const generateCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
-        
+
         function getRandomLoadout(category, dict) {
             const keys = Object.keys(dict);
             return keys[Math.floor(Math.random() * keys.length)];
         }
 
         // --- UI Logic ---
-        
+
         window.createGame = async () => {
             const code = generateCode();
             const mode = document.getElementById('host-mode').value;
             const limit = parseInt(document.getElementById('host-limit').value);
-            
+
             window.gameState.lobbyId = code;
             window.gameState.isHost = true;
             window.gameState.gameMode = mode;
@@ -140,12 +141,12 @@
         window.joinGame = async () => {
             const code = document.getElementById('join-code').value.toUpperCase();
             if (code.length !== 4) return alert("Invalid code");
-            
+
             const lobbyRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code);
             const snap = await getDoc(lobbyRef);
-            
+
             if (!snap.exists()) return alert("Lobby not found");
-            
+
             window.gameState.lobbyId = code;
             window.gameState.isHost = false;
             joinLobbyUI(code);
@@ -155,10 +156,10 @@
         // --- Pause Functions ---
         window.togglePause = () => {
             if (window.gameState.screen !== 'game') return;
-            
+
             window.gameState.paused = !window.gameState.paused;
             const menu = document.getElementById('pause-menu');
-            
+
             if (window.gameState.paused) {
                 menu.classList.remove('hidden');
             } else {
@@ -196,13 +197,13 @@
             const container = btn.parentElement;
             Array.from(container.children).forEach(c => c.classList.remove('ring-4', 'ring-blue-500', 'bg-blue-600'));
             btn.classList.add('ring-4', 'ring-blue-500', 'bg-blue-600');
-            
+
             window.gameState.myPlayer = window.gameState.myPlayer || {};
             if(!window.gameState.myPlayer.loadout) window.gameState.myPlayer.loadout = {};
-            
+
             window.gameState.myPlayer.loadout[type] = value;
         };
-        
+
         // --- Lobby Logic ---
         let lobbyUnsub = null;
         let playersUnsub = null;
@@ -216,7 +217,7 @@
                     return;
                 }
                 const data = snap.data();
-                
+
                 // Init Map Seed
                 if(data.seed && window.gameState.obstacles.length === 0) {
                     generateMap(data.seed);
@@ -229,7 +230,7 @@
                     window.gameState.gameLimit = data.limit;
                     startGame();
                 }
-                
+
                 if (data.state === 'GAME_OVER') {
                     endGame(data.winner);
                 }
@@ -237,14 +238,14 @@
 
             // Listen/Join Players Subcollection
             const playersRef = collection(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code, 'players');
-            
+
             // Register Self
             const myName = document.getElementById('player-name').value || 'Player';
             const myColor = document.getElementById('player-color').value;
-            
+
             // Initial write
             const myRef = doc(playersRef, window.gameState.user.uid);
-            
+
             // Set initial player state
             const initialData = {
                 id: window.gameState.user.uid,
@@ -252,26 +253,26 @@
                 color: myColor,
                 status: 'LOBBY',
                 ready: false,
-                x: 1000, 
+                x: 1000,
                 y: 1000,
                 hp: 100,
                 kills: 0,
                 rotation: 0,
                 loadout: { weapon: 'pistol', melee: 'knife', ability: 'sprint' } // Defaults
             };
-            
+
             setDoc(myRef, initialData);
 
             // Listen to all players
             playersUnsub = onSnapshot(playersRef, (snap) => {
                 const list = document.getElementById('player-list');
                 list.innerHTML = '';
-                
+
                 snap.forEach(d => {
                     const p = d.data();
                     // Merge remote data but keep local interpolation vars if they exist
-                    window.gameState.players[p.id] = { ...window.gameState.players[p.id], ...p }; 
-                    
+                    window.gameState.players[p.id] = { ...window.gameState.players[p.id], ...p };
+
                     const li = document.createElement('div');
                     li.className = `p-2 mb-2 rounded flex justify-between items-center ${p.ready ? 'bg-green-800' : 'bg-gray-700'}`;
                     li.innerHTML = `
@@ -302,7 +303,7 @@
         window.toggleReady = async () => {
             const btn = document.getElementById('ready-btn');
             const isReady = btn.innerText === "Ready";
-            
+
             // Finalize Loadout
             window.gameState.myPlayer = window.gameState.myPlayer || {};
             if(!window.gameState.myPlayer.loadout) window.gameState.myPlayer.loadout = { weapon: 'pistol', melee: 'knife', ability: 'sprint' };
@@ -316,9 +317,9 @@
             if (a === 'random') a = getRandomLoadout('ability', ABILITIES);
 
             const finalLoadout = { weapon: w, melee: m, ability: a };
-            
+
             // Store locally for gameplay so we don't rely on network round trip for our own stats
-            window.gameState.myPlayer.resolvedLoadout = finalLoadout; 
+            window.gameState.myPlayer.resolvedLoadout = finalLoadout;
             window.gameState.myPlayer.loadout = finalLoadout; // Force update local state
 
             await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), {
@@ -341,7 +342,7 @@
         // --- Game Engine ---
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        
+
         // Input
         const keys = {};
         const mouse = { x: 0, y: 0, down: false };
@@ -394,21 +395,24 @@
                 mouse.x = e.clientX - rect.left + window.gameState.camera.x;
                 mouse.y = e.clientY - rect.top + window.gameState.camera.y;
             });
-            window.addEventListener('mousedown', () => { 
+            window.addEventListener('mousedown', () => {
                 if (window.gameState.paused) return; // Click block
-                mouse.down = true; 
-                handleAttack(); 
+                mouse.down = true;
+                handleAttack();
             });
             window.addEventListener('mouseup', () => mouse.down = false);
             // Right click ability
-            window.addEventListener('contextmenu', e => { 
-                e.preventDefault(); 
-                if (!window.gameState.paused) handleAbility(); 
+            window.addEventListener('contextmenu', e => {
+                e.preventDefault();
+                if (!window.gameState.paused) handleAbility();
             });
+
+            // Touch Controls Init
+            initTouchControls();
 
             // Spawn Logic
             const myP = window.gameState.players[window.gameState.user.uid];
-            
+
             // Random spawn point away from obstacles
             let safe = false;
             while(!safe) {
@@ -421,7 +425,7 @@
             myP.lastShot = 0;
             myP.lastAbility = 0;
             myP.maxSpeed = 5;
-            
+
             // Ensure local loadout is set from the resolved one
             if(window.gameState.myPlayer.resolvedLoadout) {
                 myP.loadout = window.gameState.myPlayer.resolvedLoadout;
@@ -440,12 +444,75 @@
         function checkCollision(x, y, r) {
             // Map Bounds
             if (x - r < 0 || x + r > window.gameState.mapBounds.w || y - r < 0 || y + r > window.gameState.mapBounds.h) return true;
-            
+
             // Obstacles
             for(let o of window.gameState.obstacles) {
                 if (x + r > o.x && x - r < o.x + o.w && y + r > o.y && y - r < o.y + o.h) return true;
             }
             return false;
+        }
+
+        // --- Touch Controls ---
+        function initTouchControls() {
+            const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+            if (!isTouch) return;
+
+            document.getElementById('touch-controls').classList.remove('hidden');
+
+            const options = {
+                zone: document.getElementById('joystick-left'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: 'white',
+                size: 100
+            };
+
+            const managerLeft = nipplejs.create(options);
+
+            managerLeft.on('move', (evt, data) => {
+                if (data.direction) {
+                    const angle = data.angle.degree;
+                    // Reset keys
+                    keys['w'] = false; keys['s'] = false; keys['a'] = false; keys['d'] = false;
+
+                    // Map angle to keys (8-way or just vector)
+                    // Let's use simpler vector approach in game loop?
+                    // No, existing game loop uses keys. Let's map joystick vector to simulated keys or new props.
+                    // Actually, let's modify updateLocalPlayer to accept joystick input directly if keys are empty.
+
+                    // We'll store joystick data globally
+                    window.gameState.joystickMove = { x: Math.cos(data.angle.radian), y: -Math.sin(data.angle.radian) }; // Invert Y for canvas
+                }
+            });
+            managerLeft.on('end', () => {
+                window.gameState.joystickMove = null;
+                keys['w'] = false; keys['s'] = false; keys['a'] = false; keys['d'] = false;
+            });
+
+            // Right Joystick (Aim)
+            const managerRight = nipplejs.create({
+                zone: document.getElementById('joystick-right'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: 'red',
+                size: 100
+            });
+
+            managerRight.on('move', (evt, data) => {
+                // Determine aim angle
+                window.gameState.joystickAim = { x: Math.cos(data.angle.radian), y: -Math.sin(data.angle.radian) };
+                mouse.down = true; // Auto shoot when aiming? Or add a button?
+                // Let's enable shooting when joystick is pushed
+                if(data.force > 0.1) {
+                   mouse.down = true;
+                   handleAttack();
+                } else {
+                    mouse.down = false;
+                }
+            });
+            managerRight.on('end', () => {
+                mouse.down = false;
+            });
         }
 
         // --- Mechanics ---
@@ -469,10 +536,20 @@
                 p.shieldActive = true;
                 setTimeout(() => p.shieldActive = false, ability.duration);
             } else if (abilityName === 'teleport') {
-                const angle = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+                const angle = window.gameState.joystickAim
+                    ? Math.atan2(window.gameState.joystickAim.y, window.gameState.joystickAim.x) * -1 // Revert invert Y? no.
+                    : Math.atan2(mouse.y - p.y, mouse.x - p.x);
+
+                // If using joystick, angle is already direction.
+                // If using mouse, calculate.
+
+                // Let's standardize rotation first in updateLocalPlayer
+
+                let moveAngle = p.rotation;
+
                 let dist = 300;
-                let tx = p.x + Math.cos(angle) * dist;
-                let ty = p.y + Math.sin(angle) * dist;
+                let tx = p.x + Math.cos(moveAngle) * dist;
+                let ty = p.y + Math.sin(moveAngle) * dist;
                 // Simple wall check for teleport (don't land inside wall)
                 if (!checkCollision(tx, ty, 20)) {
                     p.x = tx;
@@ -498,21 +575,21 @@
              const now = Date.now();
             const p = window.gameState.players[window.gameState.user.uid];
             if (p.status !== 'ALIVE') return;
-            
+
             const meleeName = p.loadout.melee;
             const melee = MELEE[meleeName];
-            
+
             if (now - (p.lastMelee || 0) < melee.cooldown) return;
             p.lastMelee = now;
-            
+
             // Invisibility breaks on attack
             p.invisible = false;
 
             // Visuals
             window.gameState.particles.push({
-                x: p.x, y: p.y, type: 'melee', 
-                rotation: p.rotation, 
-                life: 10, maxLife: 10, 
+                x: p.x, y: p.y, type: 'melee',
+                rotation: p.rotation,
+                life: 10, maxLife: 10,
                 meleeType: meleeName
             });
 
@@ -554,7 +631,7 @@
 
             if (now - (p.lastShot || 0) < weapon.cooldown) return;
             p.lastShot = now;
-            
+
             // Invisibility breaks on attack
             p.invisible = false;
 
@@ -606,11 +683,11 @@
         }
 
         async function sendHit(targetId, dmg) {
-            // Flexible Firestore: We update the target document directly. 
+            // Flexible Firestore: We update the target document directly.
             // Note: In a production game, this logic would happen in a Cloud Function or via specific Claims to prevent cheating.
-            
+
             const targetRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', targetId);
-            
+
             try {
                 const tSnap = await getDoc(targetRef);
                 if (tSnap.exists()) {
@@ -619,10 +696,10 @@
                     // We need to know if shield is active. It's in the snap if we synced it.
                     // If not synced, we trust the attacker's local state of the remote player?
                     // Let's use the local state of the remote player we have in memory to check shield, it's faster.
-                    
+
                     let shield = window.gameState.players[targetId].shieldActive;
                     if (shield) return; // Shield blocks damage
-                    
+
                     let newHp = currentHp - dmg;
                     if (newHp <= 0 && currentHp > 0) {
                         // Kill confirmed
@@ -630,13 +707,13 @@
                         await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), {
                             kills: (window.gameState.players[window.gameState.user.uid].kills || 0) + 1
                         });
-                        
+
                         // Check Win Condition (Kills)
                         if (window.gameState.gameMode === 'KILLS' && (window.gameState.players[window.gameState.user.uid].kills + 1) >= window.gameState.gameLimit) {
                             gameOver(window.gameState.players[window.gameState.user.uid].name);
                         }
                     }
-                    
+
                     await updateDoc(targetRef, { hp: newHp, status: newHp <= 0 ? 'DEAD' : 'ALIVE' });
                 }
             } catch(e) {
@@ -653,11 +730,11 @@
 
             updateLocalPlayer(myP);
             updateProjectiles();
-            updateRemotePlayers(); 
+            updateRemotePlayers();
             checkWinConditions();
-            
+
             render();
-            
+
             requestAnimationFrame(gameLoop);
         }
 
@@ -666,22 +743,37 @@
             if (window.gameState.paused) return; // Stop updates if paused
 
             // Rotation
-            p.rotation = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+            if (window.gameState.joystickAim) {
+                // Joystick input (y is inverted in nipplejs usually? let's check.
+                // data.angle.radian goes counter-clockwise from right.
+                // Canvas Y is down.
+                // We calculated gameState.joystickAim = { x: cos, y: -sin }.
+                // Math.atan2(y, x).
+                p.rotation = Math.atan2(window.gameState.joystickAim.y, window.gameState.joystickAim.x);
+            } else {
+                p.rotation = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+            }
 
             // Movement
             let dx = 0, dy = 0;
             const speed = (p.maxSpeed || 5) * (p.speedBuff || 1);
-            
-            if (keys['w']) dy -= speed;
-            if (keys['s']) dy += speed;
-            if (keys['a']) dx -= speed;
-            if (keys['d']) dx += speed;
 
-            // Normalize diagonal
-            if (dx !== 0 && dy !== 0) {
-                const len = Math.sqrt(dx*dx + dy*dy);
-                dx = (dx/len) * speed;
-                dy = (dy/len) * speed;
+            if (window.gameState.joystickMove) {
+                // Joystick overrides keys
+                dx = window.gameState.joystickMove.x * speed;
+                dy = window.gameState.joystickMove.y * speed;
+            } else {
+                if (keys['w']) dy -= speed;
+                if (keys['s']) dy += speed;
+                if (keys['a']) dx -= speed;
+                if (keys['d']) dx += speed;
+
+                // Normalize diagonal
+                if (dx !== 0 && dy !== 0) {
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    dx = (dx/len) * speed;
+                    dy = (dy/len) * speed;
+                }
             }
 
             const newX = p.x + dx;
@@ -703,7 +795,7 @@
         function updateProjectiles() {
             for (let i = window.gameState.projectiles.length - 1; i >= 0; i--) {
                 const proj = window.gameState.projectiles[i];
-                
+
                 // Homing Logic
                 if (proj.type === 'rocket' && proj.target) {
                     const target = window.gameState.players[proj.target];
@@ -741,7 +833,7 @@
                         if (enemy.status !== 'ALIVE') continue;
 
                         const dist = Math.hypot(enemy.x - proj.x, enemy.y - proj.y);
-                        if (dist < 25) { 
+                        if (dist < 25) {
                             sendHit(pid, proj.damage);
                             window.gameState.projectiles.splice(i, 1);
                             break;
@@ -757,12 +849,12 @@
 
         function checkWinConditions() {
             if (!window.gameState.isHost) return;
-            
+
             // Last Man Standing
             if (window.gameState.gameMode === 'TIME') {
                const alive = Object.values(window.gameState.players).filter(p => p.status === 'ALIVE');
                const allPlayers = Object.keys(window.gameState.players);
-               
+
                // Only end if game has started and players are actually in
                if (allPlayers.length > 1 && alive.length === 1) {
                    gameOver(alive[0].name);
@@ -799,7 +891,7 @@
             ctx.strokeStyle = '#333';
             ctx.lineWidth = 2;
             ctx.strokeRect(0, 0, window.gameState.mapBounds.w, window.gameState.mapBounds.h);
-            
+
             // Draw Grid
             ctx.beginPath();
             ctx.strokeStyle = '#222';
@@ -832,7 +924,7 @@
                     ctx.restore();
                     continue;
                 }
-                
+
                 if (p.invisible && pid !== window.gameState.user.uid) continue; // Don't draw others if invis
 
                 ctx.save();
@@ -845,7 +937,7 @@
                 ctx.beginPath();
                 ctx.arc(0, 0, 20, 0, Math.PI*2);
                 ctx.fill();
-                
+
                 // Hands/Weapon
                 ctx.fillStyle = '#888';
                 ctx.fillRect(10, 5, 25, 8); // Gun
@@ -869,7 +961,7 @@
                     ctx.font = '12px Arial';
                     ctx.textAlign = 'center';
                     ctx.fillText(p.name, 0, 0);
-                    
+
                     // HP Bar
                     ctx.fillStyle = 'red';
                     ctx.fillRect(-20, 5, 40, 5);
@@ -898,17 +990,17 @@
                 ctx.save();
                 ctx.translate(part.x, part.y);
                 ctx.rotate(part.rotation);
-                
+
                 const meleeInfo = MELEE[part.meleeType];
                 ctx.fillStyle = meleeInfo.color;
                 ctx.globalAlpha = part.life / part.maxLife;
-                
+
                 // Draw arc
                 ctx.beginPath();
                 ctx.moveTo(0,0);
                 ctx.arc(0, 0, meleeInfo.reach, -meleeInfo.arc/2, meleeInfo.arc/2);
                 ctx.fill();
-                
+
                 ctx.restore();
                 part.life--;
                 if(part.life <= 0) window.gameState.particles.splice(i, 1);
@@ -923,20 +1015,20 @@
                 ctx.font = '20px Arial';
                 ctx.textAlign = 'left';
                 ctx.fillText(`Kills: ${myP.kills || 0}`, 20, 30);
-                
+
                 const wName = myP.loadout.weapon;
                 ctx.fillText(`Weapon: ${wName}`, 20, 60);
-                
+
                 const aName = myP.loadout.ability;
                 const aObj = ABILITIES[aName];
                 const cdRem = Math.max(0, aObj.cooldown - (Date.now() - (myP.lastAbility||0)));
                 ctx.fillText(`Ability: ${aName} ${cdRem > 0 ? (cdRem/1000).toFixed(1) : 'READY'}`, 20, 90);
-                
+
                 const mName = myP.loadout.melee;
                 const mObj = MELEE[mName];
                 const mCdRem = Math.max(0, mObj.cooldown - (Date.now() - (myP.lastMelee||0)));
                 ctx.fillText(`Melee: ${mName} ${mCdRem > 0 ? (mCdRem/1000).toFixed(1) : 'READY'} (Space)`, 20, 120);
-                
+
                 if (window.gameState.gameMode === 'TIME') {
                     ctx.fillText("Mode: Last Man Standing", canvas.width/2 - 100, 30);
                 } else {
@@ -977,6 +1069,24 @@
         .selection-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
         @media (min-width: 768px) { .selection-grid { grid-template-columns: repeat(5, 1fr); } }
         canvas { display: block; cursor: crosshair; }
+
+        /* Touch Controls */
+        #touch-controls { pointer-events: none; }
+        .joystick-zone { position: absolute; bottom: 50px; width: 150px; height: 150px; pointer-events: auto; }
+        #joystick-left { left: 50px; }
+        #joystick-right { right: 50px; }
+        .action-btn {
+            position: absolute; pointer-events: auto;
+            width: 60px; height: 60px; border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2); border: 2px solid white;
+            display: flex; justify-content: center; align-items: center;
+            color: white; font-size: 20px; font-weight: bold;
+            backdrop-filter: blur(4px);
+        }
+        .action-btn:active { background: rgba(255, 255, 255, 0.5); }
+        #btn-melee { right: 220px; bottom: 60px; }
+        #btn-ability { right: 140px; bottom: 180px; }
+        #btn-pause { left: 20px; top: 20px; width: 40px; height: 40px; font-size: 14px; }
     </style>
 </head>
 <body class="h-screen w-screen flex items-center justify-center">
@@ -987,7 +1097,7 @@
     <!-- Main Menu -->
     <div id="main-menu" class="hidden w-full max-w-4xl p-4 flex flex-col gap-8">
         <h1 class="text-6xl font-black text-center text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-600 tracking-tighter">NEON SLAYER</h1>
-        
+
         <div class="grid md:grid-cols-2 gap-8">
             <!-- Host -->
             <div class="card space-y-4">
@@ -1031,7 +1141,7 @@
                 <h3 class="text-gray-400 uppercase text-xs tracking-wider">Lobby Code</h3>
                 <div id="lobby-code-display" class="text-5xl font-mono font-bold text-blue-400 select-all">----</div>
             </div>
-            
+
             <div class="flex-grow overflow-y-auto mb-4">
                 <h3 class="text-gray-400 uppercase text-xs tracking-wider mb-2">Players</h3>
                 <div id="player-list"></div>
@@ -1044,7 +1154,7 @@
         <!-- Loadout -->
         <div class="flex-grow p-6 overflow-y-auto">
             <h2 class="text-3xl font-bold mb-6">Customize Loadout</h2>
-            
+
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 <div>
                     <label class="block text-sm text-gray-400 mb-1">Player Name</label>
@@ -1137,7 +1247,16 @@
     <!-- Game Container -->
     <div id="game-container" class="hidden absolute top-0 left-0 w-full h-full bg-black">
         <!-- Canvas injected here -->
-        <div class="absolute top-4 right-4 text-gray-500 text-xs pointer-events-none z-10">WASD to Move | Mouse to Aim | Click Shoot | Space Melee | R-Click Ability | ESC Pause</div>
+        <div class="absolute top-4 right-4 text-gray-500 text-xs pointer-events-none z-10 hidden md:block">WASD to Move | Mouse to Aim | Click Shoot | Space Melee | R-Click Ability | ESC Pause</div>
+
+        <!-- Touch Controls -->
+        <div id="touch-controls" class="hidden absolute top-0 left-0 w-full h-full z-20">
+            <div id="joystick-left" class="joystick-zone"></div>
+            <div id="joystick-right" class="joystick-zone"></div>
+            <button id="btn-melee" class="action-btn" ontouchstart="triggerMelee()"><i class="fas fa-gavel"></i></button>
+            <button id="btn-ability" class="action-btn" ontouchstart="handleAbility()"><i class="fas fa-bolt"></i></button>
+            <button id="btn-pause" class="action-btn" onclick="togglePause()"><i class="fas fa-pause"></i></button>
+        </div>
     </div>
 
     <!-- Pause Menu -->
