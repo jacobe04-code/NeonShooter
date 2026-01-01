@@ -174,10 +174,8 @@
 
         window.quitToLobby = async () => {
             // Reloading is the cleanest way to reset state and disconnect
-            // Optional: You could try to delete the player doc here before reloading
             try {
                 if (window.gameState.user && window.gameState.lobbyId) {
-                   // Best effort status update
                    const pRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid);
                    await updateDoc(pRef, { status: 'LEFT' });
                 }
@@ -240,8 +238,8 @@
             const playersRef = collection(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', code, 'players');
 
             // Register Self
-            const myName = document.getElementById('player-name').value || 'Player';
-            const myColor = document.getElementById('player-color').value;
+            const myName = document.getElementById('player-name').value || 'Guest';
+            const myColor = document.getElementById('player-color').value || '#3b82f6';
 
             // Initial write
             const myRef = doc(playersRef, window.gameState.user.uid);
@@ -270,8 +268,33 @@
 
                 snap.forEach(d => {
                     const p = d.data();
-                    // Merge remote data but keep local interpolation vars if they exist
-                    window.gameState.players[p.id] = { ...window.gameState.players[p.id], ...p };
+
+                    // --- Interpolation & Updates ---
+                    if (window.gameState.players[p.id]) {
+                        const existing = window.gameState.players[p.id];
+                        // Update interpolation targets
+                        window.gameState.players[p.id] = {
+                            ...existing,
+                            ...p, // update status, loadout, etc
+                            lastX: existing.visualX || existing.x || p.x,
+                            lastY: existing.visualY || existing.y || p.y,
+                            targetX: p.x,
+                            targetY: p.y,
+                            lastUpdate: Date.now()
+                        };
+                    } else {
+                        // New player
+                         window.gameState.players[p.id] = {
+                            ...p,
+                            visualX: p.x,
+                            visualY: p.y,
+                            lastX: p.x,
+                            lastY: p.y,
+                            targetX: p.x,
+                            targetY: p.y,
+                            lastUpdate: Date.now()
+                         };
+                    }
 
                     const li = document.createElement('div');
                     li.className = `p-2 mb-2 rounded flex justify-between items-center ${p.ready ? 'bg-green-800' : 'bg-gray-700'}`;
@@ -472,48 +495,85 @@
 
             managerLeft.on('move', (evt, data) => {
                 if (data.direction) {
-                    const angle = data.angle.degree;
-                    // Reset keys
-                    keys['w'] = false; keys['s'] = false; keys['a'] = false; keys['d'] = false;
-
-                    // Map angle to keys (8-way or just vector)
-                    // Let's use simpler vector approach in game loop?
-                    // No, existing game loop uses keys. Let's map joystick vector to simulated keys or new props.
-                    // Actually, let's modify updateLocalPlayer to accept joystick input directly if keys are empty.
-
-                    // We'll store joystick data globally
-                    window.gameState.joystickMove = { x: Math.cos(data.angle.radian), y: -Math.sin(data.angle.radian) }; // Invert Y for canvas
+                    window.gameState.joystickMove = { x: Math.cos(data.angle.radian), y: -Math.sin(data.angle.radian) };
                 }
             });
             managerLeft.on('end', () => {
                 window.gameState.joystickMove = null;
-                keys['w'] = false; keys['s'] = false; keys['a'] = false; keys['d'] = false;
             });
 
-            // Right Joystick (Aim)
-            const managerRight = nipplejs.create({
-                zone: document.getElementById('joystick-right'),
-                mode: 'static',
-                position: { left: '50%', top: '50%' },
-                color: 'red',
-                size: 100
-            });
+            // Aiming: Touch anywhere logic
+            const gameContainer = document.getElementById('game-container');
+            const leftZone = document.getElementById('joystick-left');
+            const btnMelee = document.getElementById('btn-melee');
+            const btnAbility = document.getElementById('btn-ability');
+            const btnPause = document.getElementById('btn-pause');
 
-            managerRight.on('move', (evt, data) => {
-                // Determine aim angle
-                window.gameState.joystickAim = { x: Math.cos(data.angle.radian), y: -Math.sin(data.angle.radian) };
-                mouse.down = true; // Auto shoot when aiming? Or add a button?
-                // Let's enable shooting when joystick is pushed
-                if(data.force > 0.1) {
-                   mouse.down = true;
-                   handleAttack();
-                } else {
-                    mouse.down = false;
+            function handleTouchAim(e) {
+                e.preventDefault();
+                let aimTouch = null;
+
+                for (let i = 0; i < e.touches.length; i++) {
+                    const t = e.touches[i];
+                    // Check if this touch is overlapping any excluded zone
+                    // Simplest is to check target, but target is usually the container if we touch empty space
+                    // But nipplejs creates elements.
+
+                    // We can check if the touch is strictly inside the bounds of the excluded elements?
+                    // Actually, nipplejs captures events on its zone.
+                    // We just need to make sure we don't grab the left joystick touches.
+                    // If we attach this listener to #game-container, events bubble.
+                    // But nipplejs stops propagation often.
+
+                    // Let's assume touches on the joystick zone (left) are handled by nipplejs.
+                    // We only care about touches that are NOT on the left zone.
+
+                    // Simple distance check from bottom left corner?
+                    // Left Joystick is at 50, 50 from bottom left, size 100.
+                    // Center is roughly x=100, y=window.height-100?
+                    // Actually, nipplejs uses relative positioning.
+
+                    // Let's use `target` check.
+                    // If target is game-container or canvas, it's valid for aiming.
+                    // If target is action-btn or joystick elements, ignore.
+
+                    if (t.target === canvas || t.target === gameContainer || t.target.id === 'touch-controls') {
+                        aimTouch = t;
+                        break; // Just take the first valid aim touch
+                    }
                 }
-            });
-            managerRight.on('end', () => {
-                mouse.down = false;
-            });
+
+                if (aimTouch) {
+                    const rect = canvas.getBoundingClientRect();
+                    const centerX = rect.width / 2;
+                    const centerY = rect.height / 2;
+
+                    const tx = aimTouch.clientX - rect.left;
+                    const ty = aimTouch.clientY - rect.top;
+
+                    const angle = Math.atan2(ty - centerY, tx - centerX);
+                    window.gameState.joystickAim = { x: Math.cos(angle), y: -Math.sin(angle) }; // Invert Y for logic
+                    mouse.down = true; // Auto-fire while aiming
+                } else {
+                    // No aim touch found (maybe lifted finger)
+                     if (e.type === 'touchend' && e.touches.length === 0) {
+                        window.gameState.joystickAim = null;
+                        mouse.down = false;
+                     } else if (e.type === 'touchend') {
+                         // Check if any remaining touches are valid aim touches
+                         // ... simplified: just reset if we didn't find one above
+                         window.gameState.joystickAim = null;
+                         mouse.down = false;
+                     }
+                }
+            }
+
+            gameContainer.addEventListener('touchstart', handleTouchAim, {passive: false});
+            gameContainer.addEventListener('touchmove', handleTouchAim, {passive: false});
+            gameContainer.addEventListener('touchend', (e) => {
+                 // Re-evaluate to see if we still have an aim touch
+                 handleTouchAim(e);
+            }, {passive: false});
         }
 
         // --- Mechanics ---
@@ -538,20 +598,14 @@
                 setTimeout(() => p.shieldActive = false, ability.duration);
             } else if (abilityName === 'teleport') {
                 const angle = window.gameState.joystickAim
-                    ? Math.atan2(window.gameState.joystickAim.y, window.gameState.joystickAim.x) * -1 // Revert invert Y? no.
+                    ? Math.atan2(window.gameState.joystickAim.y, window.gameState.joystickAim.x) * -1
                     : Math.atan2(mouse.y - p.y, mouse.x - p.x);
-
-                // If using joystick, angle is already direction.
-                // If using mouse, calculate.
-
-                // Let's standardize rotation first in updateLocalPlayer
 
                 let moveAngle = p.rotation;
 
                 let dist = 300;
                 let tx = p.x + Math.cos(moveAngle) * dist;
                 let ty = p.y + Math.sin(moveAngle) * dist;
-                // Simple wall check for teleport (don't land inside wall)
                 if (!checkCollision(tx, ty, 20)) {
                     p.x = tx;
                     p.y = ty;
@@ -560,11 +614,6 @@
                 p.invisible = true;
                 setTimeout(() => p.invisible = false, ability.duration);
             }
-
-            // Sync ability usage event (conceptually)
-            // Ideally we'd push an event, but for this demo we just rely on state props syncing (invisible, shieldActive)
-            // But 'invisible' and 'shieldActive' are local vars unless we sync them.
-            // Let's add them to the sync payload!
         }
 
         function handleAttack() {
@@ -582,11 +631,8 @@
 
             if (now - (p.lastMelee || 0) < melee.cooldown) return;
             p.lastMelee = now;
-
-            // Invisibility breaks on attack
             p.invisible = false;
 
-            // Visuals
             window.gameState.particles.push({
                 x: p.x, y: p.y, type: 'melee',
                 rotation: p.rotation,
@@ -594,8 +640,6 @@
                 meleeType: meleeName
             });
 
-            // Logic: Check hits on other players locally, then send 'HIT' event?
-            // Trusted client for hits is easier here.
             for (let pid in window.gameState.players) {
                 if (pid === window.gameState.user.uid) continue;
                 const target = window.gameState.players[pid];
@@ -610,7 +654,6 @@
 
                 let hit = false;
                 if (meleeName === 'axe') {
-                    // Full circle
                     if (dist < melee.reach) hit = true;
                 } else {
                     if (dist < melee.reach && angleDiff < melee.arc / 2) hit = true;
@@ -632,13 +675,10 @@
 
             if (now - (p.lastShot || 0) < weapon.cooldown) return;
             p.lastShot = now;
-
-            // Invisibility breaks on attack
             p.invisible = false;
 
             const createProj = (angleOffset = 0) => {
                 const angle = p.rotation + angleOffset;
-                // Add recoil/spread
                 const spread = (Math.random() - 0.5) * weapon.spread;
                 const finalAngle = angle + spread;
 
@@ -655,9 +695,7 @@
                     target: null
                 };
 
-                // Homing Rocket Logic
                 if (weaponName === 'rocket') {
-                    // Find nearest enemy
                     let minDist = Infinity;
                     let targetId = null;
                     for(let pid in window.gameState.players) {
@@ -684,32 +722,22 @@
         }
 
         async function sendHit(targetId, dmg) {
-            // Flexible Firestore: We update the target document directly.
-            // Note: In a production game, this logic would happen in a Cloud Function or via specific Claims to prevent cheating.
-
             const targetRef = doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', targetId);
 
             try {
                 const tSnap = await getDoc(targetRef);
                 if (tSnap.exists()) {
                     let currentHp = tSnap.data().hp;
-                    // Check shield
-                    // We need to know if shield is active. It's in the snap if we synced it.
-                    // If not synced, we trust the attacker's local state of the remote player?
-                    // Let's use the local state of the remote player we have in memory to check shield, it's faster.
-
                     let shield = window.gameState.players[targetId].shieldActive;
-                    if (shield) return; // Shield blocks damage
+                    if (shield) return;
 
                     let newHp = currentHp - dmg;
                     if (newHp <= 0 && currentHp > 0) {
-                        // Kill confirmed
                         newHp = 0;
                         await updateDoc(doc(db, 'artifacts', window.gameState.appId, 'public', 'data', 'lobbies', window.gameState.lobbyId, 'players', window.gameState.user.uid), {
                             kills: (window.gameState.players[window.gameState.user.uid].kills || 0) + 1
                         });
 
-                        // Check Win Condition (Kills)
                         if (window.gameState.gameMode === 'KILLS' && (window.gameState.players[window.gameState.user.uid].kills + 1) >= window.gameState.gameLimit) {
                             gameOver(window.gameState.players[window.gameState.user.uid].name);
                         }
@@ -741,15 +769,10 @@
 
         function updateLocalPlayer(p) {
             if (p.status === 'DEAD') return;
-            if (window.gameState.paused) return; // Stop updates if paused
+            if (window.gameState.paused) return;
 
             // Rotation
             if (window.gameState.joystickAim) {
-                // Joystick input (y is inverted in nipplejs usually? let's check.
-                // data.angle.radian goes counter-clockwise from right.
-                // Canvas Y is down.
-                // We calculated gameState.joystickAim = { x: cos, y: -sin }.
-                // Math.atan2(y, x).
                 p.rotation = Math.atan2(window.gameState.joystickAim.y, window.gameState.joystickAim.x);
             } else {
                 p.rotation = Math.atan2(mouse.y - p.y, mouse.x - p.x);
@@ -760,7 +783,6 @@
             const speed = (p.maxSpeed || 5) * (p.speedBuff || 1);
 
             if (window.gameState.joystickMove) {
-                // Joystick overrides keys
                 dx = window.gameState.joystickMove.x * speed;
                 dy = window.gameState.joystickMove.y * speed;
             } else {
@@ -769,7 +791,6 @@
                 if (keys['a']) dx -= speed;
                 if (keys['d']) dx += speed;
 
-                // Normalize diagonal
                 if (dx !== 0 && dy !== 0) {
                     const len = Math.sqrt(dx*dx + dy*dy);
                     dx = (dx/len) * speed;
@@ -780,15 +801,12 @@
             const newX = p.x + dx;
             const newY = p.y + dy;
 
-            // Collision
             if (!checkCollision(newX, p.y, 20)) p.x = newX;
             if (!checkCollision(p.x, newY, 20)) p.y = newY;
 
-            // Camera follow
             window.gameState.camera.x = p.x - canvas.width / 2;
             window.gameState.camera.y = p.y - canvas.height / 2;
 
-            // Actions
             if (mouse.down) shoot();
             if (keys[' ']) triggerMelee();
         }
@@ -797,12 +815,10 @@
             for (let i = window.gameState.projectiles.length - 1; i >= 0; i--) {
                 const proj = window.gameState.projectiles[i];
 
-                // Homing Logic
                 if (proj.type === 'rocket' && proj.target) {
                     const target = window.gameState.players[proj.target];
                     if (target && target.status === 'ALIVE') {
                         const angle = Math.atan2(target.y - proj.y, target.x - proj.x);
-                        // Steer
                         let cvx = Math.cos(angle) * 6;
                         let cvy = Math.sin(angle) * 6;
                         proj.vx = proj.vx * 0.9 + cvx * 0.1;
@@ -814,19 +830,16 @@
                 proj.y += proj.vy;
                 proj.distTraveled += Math.sqrt(proj.vx*proj.vx + proj.vy*proj.vy);
 
-                // Wall Collision
                 if (checkCollision(proj.x, proj.y, 5)) {
                     window.gameState.projectiles.splice(i, 1);
                     continue;
                 }
 
-                // Range
                 if (proj.distTraveled > proj.range) {
                     window.gameState.projectiles.splice(i, 1);
                     continue;
                 }
 
-                // Player Collision (ONLY OWNER CHECKS HIT)
                 if (proj.ownerId === window.gameState.user.uid) {
                     for (let pid in window.gameState.players) {
                         if (pid === window.gameState.user.uid) continue;
@@ -845,23 +858,39 @@
         }
 
         function updateRemotePlayers() {
-            // Visual interpolation is implicit via the 10hz update rate
+             const now = Date.now();
+             for (let pid in window.gameState.players) {
+                 if (pid === window.gameState.user.uid) continue;
+                 const p = window.gameState.players[pid];
+                 if (p.status === 'DEAD') continue;
+
+                 if (p.lastUpdate && p.targetX !== undefined) {
+                     const timeSince = now - p.lastUpdate;
+                     // Interpolate over 100ms (snapshot rate)
+                     // Cap at 1 to prevent overshooting if lag spikes
+                     const alpha = Math.min(timeSince / 100.0, 1.0);
+
+                     p.visualX = p.lastX + (p.targetX - p.lastX) * alpha;
+                     p.visualY = p.lastY + (p.targetY - p.lastY) * alpha;
+                 } else {
+                     p.visualX = p.x;
+                     p.visualY = p.y;
+                 }
+             }
         }
 
         function checkWinConditions() {
             if (!window.gameState.isHost) return;
-            if (Date.now() - window.gameState.gameStart < 5000) return; // 5s Grace period for loading
+            if (Date.now() - window.gameState.gameStart < 5000) return;
 
-            // Last Man Standing
             if (window.gameState.gameMode === 'TIME') {
                const alive = Object.values(window.gameState.players).filter(p => p.status === 'ALIVE');
                const allPlayers = Object.keys(window.gameState.players);
 
-               // Only end if game has started and players are actually in
                if (allPlayers.length > 1 && alive.length === 1) {
                    gameOver(alive[0].name);
                } else if (allPlayers.length > 1 && alive.length === 0) {
-                   gameOver("No one"); // Draw
+                   gameOver("No one");
                }
             }
         }
@@ -882,26 +911,22 @@
 
         // --- Rendering ---
         function render() {
-            // Clear
             ctx.fillStyle = '#1a1a1a';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
             ctx.save();
             ctx.translate(-window.gameState.camera.x, -window.gameState.camera.y);
 
-            // Draw Map Background
             ctx.strokeStyle = '#333';
             ctx.lineWidth = 2;
             ctx.strokeRect(0, 0, window.gameState.mapBounds.w, window.gameState.mapBounds.h);
 
-            // Draw Grid
             ctx.beginPath();
             ctx.strokeStyle = '#222';
             for(let x=0; x<=window.gameState.mapBounds.w; x+=100) { ctx.moveTo(x,0); ctx.lineTo(x, window.gameState.mapBounds.h); }
             for(let y=0; y<=window.gameState.mapBounds.h; y+=100) { ctx.moveTo(0,y); ctx.lineTo(window.gameState.mapBounds.w, y); }
             ctx.stroke();
 
-            // Draw Obstacles
             ctx.fillStyle = '#444';
             for(let o of window.gameState.obstacles) {
                 ctx.fillRect(o.x, o.y, o.w, o.h);
@@ -909,13 +934,15 @@
                 ctx.strokeRect(o.x, o.y, o.w, o.h);
             }
 
-            // Draw Players
             for (let pid in window.gameState.players) {
                 const p = window.gameState.players[pid];
+                // Use visual coords for rendering if remote
+                const drawX = (pid === window.gameState.user.uid) ? p.x : (p.visualX || p.x);
+                const drawY = (pid === window.gameState.user.uid) ? p.y : (p.visualY || p.y);
+
                 if (p.status === 'DEAD') {
-                    // Draw Dead Body
                     ctx.save();
-                    ctx.translate(p.x, p.y);
+                    ctx.translate(drawX, drawY);
                     ctx.fillStyle = '#333';
                     ctx.beginPath();
                     ctx.arc(0, 0, 15, 0, Math.PI*2);
@@ -927,24 +954,21 @@
                     continue;
                 }
 
-                if (p.invisible && pid !== window.gameState.user.uid) continue; // Don't draw others if invis
+                if (p.invisible && pid !== window.gameState.user.uid) continue;
 
                 ctx.save();
-                ctx.translate(p.x, p.y);
+                ctx.translate(drawX, drawY);
                 ctx.rotate(p.rotation);
 
-                // Body
                 ctx.globalAlpha = (p.invisible && pid === window.gameState.user.uid) ? 0.4 : 1.0;
                 ctx.fillStyle = p.color || '#fff';
                 ctx.beginPath();
                 ctx.arc(0, 0, 20, 0, Math.PI*2);
                 ctx.fill();
 
-                // Hands/Weapon
                 ctx.fillStyle = '#888';
-                ctx.fillRect(10, 5, 25, 8); // Gun
+                ctx.fillRect(10, 5, 25, 8);
 
-                // Shield visual
                 if (p.shieldActive) {
                     ctx.strokeStyle = '#00ffff';
                     ctx.lineWidth = 3;
@@ -955,16 +979,14 @@
 
                 ctx.restore();
 
-                // Nameplate & HP (Always visible unless invis)
                 if (!p.invisible || pid === window.gameState.user.uid) {
                     ctx.save();
-                    ctx.translate(p.x, p.y - 35);
+                    ctx.translate(drawX, drawY - 35);
                     ctx.fillStyle = '#fff';
                     ctx.font = '12px Arial';
                     ctx.textAlign = 'center';
                     ctx.fillText(p.name, 0, 0);
 
-                    // HP Bar
                     ctx.fillStyle = 'red';
                     ctx.fillRect(-20, 5, 40, 5);
                     ctx.fillStyle = 'green';
@@ -973,7 +995,6 @@
                 }
             }
 
-            // Draw Projectiles
             for (let proj of window.gameState.projectiles) {
                 ctx.beginPath();
                 if (proj.type === 'rocket') {
@@ -986,7 +1007,6 @@
                 ctx.fill();
             }
 
-            // Draw Melee Swings (Particles)
             for (let i=window.gameState.particles.length-1; i>=0; i--) {
                 const part = window.gameState.particles[i];
                 ctx.save();
@@ -997,7 +1017,6 @@
                 ctx.fillStyle = meleeInfo.color;
                 ctx.globalAlpha = part.life / part.maxLife;
 
-                // Draw arc
                 ctx.beginPath();
                 ctx.moveTo(0,0);
                 ctx.arc(0, 0, meleeInfo.reach, -meleeInfo.arc/2, meleeInfo.arc/2);
@@ -1010,7 +1029,6 @@
 
             ctx.restore();
 
-            // HUD
             const myP = window.gameState.players[window.gameState.user.uid];
             if (myP) {
                 ctx.fillStyle = 'white';
@@ -1039,7 +1057,6 @@
             }
         }
 
-        // --- Network Sync ---
         async function networkSync() {
             if (window.gameState.screen !== 'game') return;
             const myP = window.gameState.players[window.gameState.user.uid];
@@ -1051,7 +1068,6 @@
                 rotation: myP.rotation,
                 hp: myP.hp,
                 status: myP.status,
-                // Sync ability states for visuals
                 shieldActive: myP.shieldActive || false,
                 invisible: myP.invisible || false,
                 lastUpdate: serverTimestamp()
@@ -1076,7 +1092,7 @@
         #touch-controls { pointer-events: none; }
         .joystick-zone { position: absolute; bottom: 50px; width: 150px; height: 150px; pointer-events: auto; }
         #joystick-left { left: 50px; }
-        #joystick-right { right: 50px; }
+        /* Right joystick removed */
         .action-btn {
             position: absolute; pointer-events: auto;
             width: 60px; height: 60px; border-radius: 50%;
@@ -1086,8 +1102,8 @@
             backdrop-filter: blur(4px);
         }
         .action-btn:active { background: rgba(255, 255, 255, 0.5); }
-        #btn-melee { right: 220px; bottom: 60px; }
-        #btn-ability { right: 140px; bottom: 180px; }
+        #btn-melee { right: 50px; bottom: 80px; }
+        #btn-ability { right: 140px; bottom: 80px; }
         #btn-pause { left: 20px; top: 20px; width: 40px; height: 40px; font-size: 14px; }
     </style>
 </head>
@@ -1099,6 +1115,21 @@
     <!-- Main Menu -->
     <div id="main-menu" class="hidden w-full max-w-4xl p-4 flex flex-col gap-8">
         <h1 class="text-6xl font-black text-center text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-600 tracking-tighter">NEON SLAYER</h1>
+
+        <!-- Player Identity Config -->
+        <div class="card space-y-4">
+            <h2 class="text-xl font-bold mb-4 text-gray-300">Player Profile</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Player Name</label>
+                    <input id="player-name" type="text" class="input" placeholder="Enter Name" value="Guest">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Color</label>
+                    <input id="player-color" type="color" class="input h-12 p-1" value="#3b82f6">
+                </div>
+            </div>
+        </div>
 
         <div class="grid md:grid-cols-2 gap-8">
             <!-- Host -->
@@ -1157,16 +1188,7 @@
         <div class="flex-grow p-6 overflow-y-auto">
             <h2 class="text-3xl font-bold mb-6">Customize Loadout</h2>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Player Name</label>
-                    <input id="player-name" type="text" class="input" placeholder="Enter Name" value="Guest">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Color</label>
-                    <input id="player-color" type="color" class="input h-12 p-1" value="#3b82f6">
-                </div>
-            </div>
+            <!-- Removed Player Name/Color from here -->
 
             <!-- Weapons -->
             <div class="mb-8">
@@ -1254,7 +1276,7 @@
         <!-- Touch Controls -->
         <div id="touch-controls" class="hidden absolute top-0 left-0 w-full h-full z-20">
             <div id="joystick-left" class="joystick-zone"></div>
-            <div id="joystick-right" class="joystick-zone"></div>
+            <!-- Right joystick removed -->
             <button id="btn-melee" class="action-btn" ontouchstart="triggerMelee()"><i class="fas fa-gavel"></i></button>
             <button id="btn-ability" class="action-btn" ontouchstart="handleAbility()"><i class="fas fa-bolt"></i></button>
             <button id="btn-pause" class="action-btn" onclick="togglePause()"><i class="fas fa-pause"></i></button>
