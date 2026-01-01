@@ -373,6 +373,7 @@
         }
 
         function startGame() {
+            window.gameState.gameStart = Date.now();
             window.gameState.screen = 'game';
             document.getElementById('lobby-screen').classList.add('hidden');
             document.getElementById('game-container').classList.remove('hidden');
@@ -849,6 +850,7 @@
 
         function checkWinConditions() {
             if (!window.gameState.isHost) return;
+            if (Date.now() - window.gameState.gameStart < 5000) return; // 5s Grace period for loading
 
             // Last Man Standing
             if (window.gameState.gameMode === 'TIME') {
